@@ -1,40 +1,17 @@
-# --- FMT Support via CPM ---
-set(NS3_WITH_FMT "" CACHE PATH "Build with FMT support")
-set(NS3_FMT "OFF" CACHE INTERNAL "ON if FMT is successfully found or built")
-
-# Ensure the parent library name is available when this subdirectory is
-# processed outside of the `build_lib` function scope.
-set(BLIB_LIBNAME lxechoserver)
-
-# Tracks if the target exists
+# Build example executable from Ns3Code.cpp
 if(TARGET fmt::fmt)
-    set(NS3_FMT "ON" CACHE INTERNAL "ON if FMT is successfully found or built")
-else()
-    message(STATUS "Skipping examples requiring FMT")
-endif()
-
-set(EXAMPLES_COMMON_LIBS
-
-    # ${lxechoserver}
-    ${libcore}
-    ${libpoint-to-point}
-    ${libinternet}
-    ${libapplications}
-    fmt::fmt
-)
-
-macro(build_custom_library_example name source)
     build_lib_example(
-        NAME custom_ns3_code
+        NAME ns3_echo_server_example
         SOURCE_FILES Ns3Code.cpp
-        LIBRARIES_TO_LINK ${EXAMPLES_COMMON_LIBS}
+        LIBRARIES_TO_LINK
+            ${libechoserverlinuxns3}
+            ${libcore}
+            ${libpoint-to-point}
+            ${libinternet}
+            ${libapplications}
     )
-
-    if(TARGET custom_ns3_code AND TARGET fmt::fmt)
-        # Use plain signature to match previous plain-style uses in build_exec
-        target_link_libraries(custom_ns3_code fmt::fmt)
-    endif()
-endmacro()
-
-# --- Build Examples ---
-build_custom_library_example(Ns3Code Ns3Code.cpp)
+    
+    target_link_libraries(ns3_echo_server_example fmt::fmt)
+else()
+    message(STATUS "Skipping ns3_echo_server_example: fmt not found")
+endif()
