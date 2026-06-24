@@ -19,18 +19,25 @@ endif()
 
 # ---- linux echo server module ----
 build_lib(
-    LIBNAME lxechoserver
+    LIBNAME echoserverlinuxns3
 
     SOURCE_FILES
-
-    # library public sources (keep module implementation separate from examples)
     empty.cc
+
+    HEADER_FILES
+    empty.h
+
     LIBRARIES_TO_LINK
     ${libcore}
     ${libnetwork}
     ${libinternet}
     ${libapplications}
     ${libstats}
-    fmt::fmt
 )
+
+# Linking external lib separately, not with ns3 libs
+if(NS3_FMT)
+    target_link_libraries(${libechoserverlinuxns3} PUBLIC fmt::fmt)
+endif()
+
 add_subdirectory(tasks)
