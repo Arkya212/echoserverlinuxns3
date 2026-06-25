@@ -1,41 +1,27 @@
-# Build example executable from Ns3Code.cpp
-if(TARGET fmt::fmt)
-    build_lib_example(
-        NAME ns3_echo_server_example
-        SOURCE_FILES Ns3Code.cpp
-        LIBRARIES_TO_LINK
-            ${libechoserverlinuxns3}
-            ${libcore}
-            ${libpoint-to-point}
-            ${libinternet}
-            ${libapplications}
-    )
+# ─────────────────────────────────────────────────────────────────────────────
+# BLIB_LIBNAME must be set explicitly here.
+# build_lib() is a CMake *function* — BLIB_LIBNAME it parses is scoped to
+# that function and is NOT visible here. build_lib_example reads it from the
+# *caller's* scope, so we inject it manually.
+# ─────────────────────────────────────────────────────────────────────────────
+set(BLIB_LIBNAME echoserverlinuxns3)
 
-    build_lib_example(
-        NAME curl_simulation
-        SOURCE_FILES curl-tap-emulation.cpp
-        LIBRARIES_TO_LINK
-            ${libnetwork}
-            ${libtap-bridge}
-            ${libcore}
-            ${libpoint-to-point}
-            ${libinternet}
-            ${libapplications}
-    )
+set(COMMON_LIBS_TO_LINK
+    ns3::core
+    ns3::point-to-point
+    ns3::internet
+    ns3::applications
+    ${libechoserverlinuxns3}
+    fmt::fmt
+)
 
-    # Real socket server (no root needed)
+macro(build_echoserver_code name source)
     build_lib_example(
-        NAME curl_real_socket
-        SOURCE_FILES curl-real-socket.cpp
-        LIBRARIES_TO_LINK
-            ${libcore}
-            ${libpoint-to-point}
-            ${libinternet}
-            ${libapplications}
+        NAME         ${name}
+        SOURCE_FILES ${source}
+        LIBRARIES_TO_LINK ${COMMON_LIBS_TO_LINK}
     )
-    
-    target_link_libraries(ns3_echo_server_example fmt::fmt)
-    target_link_libraries(curl_simulation fmt::fmt)
-else()
-    message(STATUS "Skipping ns3_echo_server_example: fmt not found")
-endif()
+endmacro()
+
+build_echoserver_code(ns3_echo_server_example Ns3Code.cpp)
+build_echoserver_code(curlrealsocket         curlrealsocket.cpp)
