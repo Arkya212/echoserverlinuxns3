@@ -5,5 +5,5 @@
 #include "empty.h"
 
 namespace ns3 {
-static int lxechoserver_placeholder = 0;
+[[maybe_unused]] static int lxechoserver_placeholder = 0;
 } // namespace ns3
