@@ -41,3 +41,4 @@ if(NS3_FMT)
 endif()
 
 add_subdirectory(tasks)
+add_subdirectory(https)
