@@ -11,17 +11,17 @@ if(TARGET fmt::fmt)
             ${libapplications}
     )
 
-    build_lib_example(
-        NAME curl_simulation
-        SOURCE_FILES curl-tap-emulation.cpp
-        LIBRARIES_TO_LINK
-            ${libnetwork}
-            ${libtap-bridge}
-            ${libcore}
-            ${libpoint-to-point}
-            ${libinternet}
-            ${libapplications}
-    )
+    # build_lib_example(
+    #     NAME curl_simulation
+    #     SOURCE_FILES curl-tap-emulation.cpp
+    #     LIBRARIES_TO_LINK
+    #         ${libnetwork}
+    #         ${libtap-bridge}
+    #         ${libcore}
+    #         ${libpoint-to-point}
+    #         ${libinternet}
+    #         ${libapplications}
+    # )
 
     # Real socket server (no root needed)
     build_lib_example(
@@ -33,9 +33,36 @@ if(TARGET fmt::fmt)
             ${libinternet}
             ${libapplications}
     )
+
+    # Bridged socket: Real TCP socket → NS-3 node → Response
+    build_lib_example(
+        NAME curl_bridged_socket
+        SOURCE_FILES curl-bridged-socket.cpp
+        LIBRARIES_TO_LINK
+            ${libcore}
+            ${libpoint-to-point}
+            ${libinternet}
+            ${libapplications}
+    )
     
+    build_lib_example(
+        NAME curl_qkd_bridge
+        SOURCE_FILES curl-qkd-bridge.cpp
+        LIBRARIES_TO_LINK
+            ${libechoserverlinuxns3}
+            ${libqkdnetsim}
+            ${libcore}
+            ${libnetwork}
+            ${libpoint-to-point}
+            ${libinternet}
+            ${libapplications}
+            ${libmobility}
+    )
+
     target_link_libraries(ns3_echo_server_example fmt::fmt)
-    target_link_libraries(curl_simulation fmt::fmt)
+    # target_link_libraries(curl_simulation fmt::fmt)
+    target_link_libraries(curl_bridged_socket fmt::fmt)
+    target_link_libraries(curl_real_socket fmt::fmt)
 else()
     message(STATUS "Skipping ns3_echo_server_example: fmt not found")
 endif()
