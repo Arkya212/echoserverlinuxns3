@@ -1,6 +1,8 @@
 # ---- linux echo server internal includes ----
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/tasks
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/external/cpp-httplib-0.14.3
 )
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
@@ -42,3 +44,4 @@ endif()
 
 add_subdirectory(tasks)
 add_subdirectory(https)
+add_subdirectory(app)
