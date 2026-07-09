@@ -2,3 +2,5 @@ build/
 external/cpp-*
 certs/
 *.pem
+*.gz
+*.tar
