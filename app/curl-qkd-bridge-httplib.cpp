@@ -134,24 +134,29 @@ static void SetupQkdTopology(NodeContainer& n,
     ppApps.Start(Seconds(1.0));
     ppApps.Stop(Seconds(simTime - 5));
 
-    Config::SetDefault("ns3::QKDApp014::NumberOfKeyToFetchFromKMS",
-                       UintegerValue(numberOfKeyToFetchFromKMS));
-    Config::SetDefault("ns3::QKDApp014::AuthenticationType", UintegerValue(1));
-    Config::SetDefault("ns3::QKDApp014::EncryptionType",     UintegerValue(2));
-    Config::SetDefault("ns3::QKDApp014::AESLifetime",        UintegerValue(10000));
-    Config::SetDefault("ns3::QKDApp014::UseCrypto",          UintegerValue(1));
-
-    uint16_t commPort = 8081;
-    ApplicationContainer cryptoApps;
-    cryptoApps.Add(QAHelper.InstallQKDApplication(
-        n.Get(0), n.Get(2),
-        InetSocketAddress(i0i1.GetAddress(0), commPort),
-        InetSocketAddress(i1i2.GetAddress(1), commPort),
-        n.Get(5), n.Get(6),
-        "tcp", 1000, DataRate("100kbps"), "etsi014"
-    ));
-    cryptoApps.Start(Seconds(5.0));
-    cryptoApps.Stop(Seconds(simTime - 5));
+    // NOTE: QKDApp014 crypto apps are disabled so that keys accumulate
+    // in the SBuffers and remain available for retrieval via the ETSI API.
+    // Uncomment below to enable simulated encrypted communication (which
+    // will consume keys from the same SBuffers the API queries).
+    //
+    // Config::SetDefault("ns3::QKDApp014::NumberOfKeyToFetchFromKMS",
+    //                    UintegerValue(numberOfKeyToFetchFromKMS));
+    // Config::SetDefault("ns3::QKDApp014::AuthenticationType", UintegerValue(1));
+    // Config::SetDefault("ns3::QKDApp014::EncryptionType",     UintegerValue(2));
+    // Config::SetDefault("ns3::QKDApp014::AESLifetime",        UintegerValue(10000));
+    // Config::SetDefault("ns3::QKDApp014::UseCrypto",          UintegerValue(1));
+    //
+    // uint16_t commPort = 8081;
+    // ApplicationContainer cryptoApps;
+    // cryptoApps.Add(QAHelper.InstallQKDApplication(
+    //     n.Get(0), n.Get(2),
+    //     InetSocketAddress(i0i1.GetAddress(0), commPort),
+    //     InetSocketAddress(i1i2.GetAddress(1), commPort),
+    //     n.Get(5), n.Get(6),
+    //     "tcp", 1000, DataRate("100kbps"), "etsi014"
+    // ));
+    // cryptoApps.Start(Seconds(5.0));
+    // cryptoApps.Stop(Seconds(simTime - 5));
 
     Ipv4GlobalRoutingHelper::PopulateRoutingTables();
     QLinkHelper.CreateTopologyGraph({ctrlA, ctrlB});
@@ -181,14 +186,12 @@ int main(int argc, char* argv[])
     GlobalValue::Bind("SimulatorImplementationType",
                       StringValue("ns3::RealtimeSimulatorImpl"));
 
-    // ── Build QKD topology ──
     NodeContainer n;
     Ptr<QKDKeyManagerSystemApplication> kmsA, kmsB;
     SetupQkdTopology(n, kmsA, kmsB, simTime,
                      ppKeySize, ppKeyRate, ppPacketSize, ppRate,
                      numberOfKeyToFetchFromKMS);
 
-    // ── cpp-httplib HTTPS server ──
     httplib::SSLServer svr(certFile.c_str(), keyFile.c_str());
     if (!svr.is_valid()) {
         NS_LOG_UNCOND("Failed to create HTTPS server. Generate certs first:");
@@ -197,8 +200,10 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    // Register QKD KMS routes via the reusable handler from src/
-    KmsBridgeHandler handler(kmsA, kmsB);
+    // Register ETSI QKD 014 routes (original working dual KMS setup)
+    KmsBridgeHandler handler;
+    handler.AddKmeEndpoint({"KME-A", "alice", "bob", "KME-B", kmsA});
+    handler.AddKmeEndpoint({"KME-B", "bob", "alice", "KME-A", kmsB});
     handler.RegisterRoutes(svr);
 
     // Run httplib in a background thread
@@ -206,31 +211,35 @@ int main(int argc, char* argv[])
         NS_LOG_UNCOND("");
         NS_LOG_UNCOND("=== QKD Key Server (HTTPS via cpp-httplib) on port "
                       << curlPort << " ===");
-        NS_LOG_UNCOND("Endpoints:");
+        NS_LOG_UNCOND("ETSI QKD 014 Endpoints:");
         NS_LOG_UNCOND("  GET  https://<HOST>:" << curlPort
-                      << "/api/v1/keys/{alice|bob}/status");
+                      << "/api/v1/keys/{master_SAE_ID}/status");
         NS_LOG_UNCOND("  GET  https://<HOST>:" << curlPort
-                      << "/api/v1/keys/{alice|bob}/enc_keys");
-        NS_LOG_UNCOND("  GET  https://<HOST>:" << curlPort
-                      << "/api/v1/keys/{alice|bob}/enc_keys/number/{N}");
+                      << "/api/v1/keys/{slave_SAE_ID}/enc_keys?number=N&size=S");
         NS_LOG_UNCOND("  POST https://<HOST>:" << curlPort
-                      << "/api/v1/keys/{alice|bob}/dec_keys");
+                      << "/api/v1/keys/{master_SAE_ID}/dec_keys");
         NS_LOG_UNCOND("");
+        NS_LOG_UNCOND("SAE IDs: alice (KME-A), bob (KME-B) — dual KMS");
         NS_LOG_UNCOND("Usage:  curl -k https://localhost:" << curlPort
                       << "/api/v1/keys/alice/status");
+        NS_LOG_UNCOND("        curl -k https://localhost:" << curlPort
+                      << "/api/v1/keys/alice/enc_keys?number=3&size=256");
         NS_LOG_UNCOND("");
 
-        svr.listen("0.0.0.0", curlPort);
+        NS_LOG_UNCOND("Attempting to Start the Server: ");
+        bool success = svr.listen("0.0.0.0", curlPort);
+        if (!success) {
+            NS_LOG_UNCOND("Failed to start the server");
+        }
     });
 
     NS_LOG_UNCOND("Simulation running for " << simTime
                   << "s. Keys generated after ~2-3s.");
     NS_LOG_UNCOND("Press Ctrl+C to stop.");
 
-    Simulator::Stop(Seconds(simTime));
+    // Simulator::Stop(Seconds(simTime)); 
     Simulator::Run();
 
-    // Graceful shutdown
     svr.stop();
     serverThread.join();
 
