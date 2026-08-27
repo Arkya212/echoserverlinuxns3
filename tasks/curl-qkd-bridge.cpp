@@ -366,7 +366,13 @@ void TcpResponseThread()
 
 int main(int argc, char* argv[])
 {
-    uint16_t curlPort = 8080;
+    /*
+    Here, we can't use a port that is already being used by any other process
+    ss -tulnp
+    lists all the processes that are listening on diff ports. If we use any Port
+    that is already listed in the output, we get a bind error.
+    */
+    uint16_t curlPort = 43417;
     double simTime = 600.0;
     uint32_t ppKeySize = 512;
     std::string ppKeyRate = "100kbps";
