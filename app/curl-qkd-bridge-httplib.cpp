@@ -32,6 +32,7 @@
 #include "ns3/s-buffer.h"
 #include "ns3/q-buffer.h"
 
+#include <cstdlib>
 #include <thread>
 
 using namespace ns3;
@@ -176,11 +177,25 @@ int main(int argc, char* argv[])
     std::string certFile = "cert.pem";
     std::string keyFile  = "key.pem";
 
+    // SAE and KME identifiers (env var fallback: MASTER_SAE_ID, SLAVE_SAE_ID, KME_ID_A, KME_ID_B)
+    auto envOr = [](const char* name, const char* def) -> std::string {
+        const char* v = std::getenv(name);
+        return (v && v[0]) ? v : def;
+    };
+    std::string masterSae = envOr("MASTER_SAE_ID", "alice");
+    std::string slaveSae  = envOr("SLAVE_SAE_ID",  "bob");
+    std::string kmeIdA    = envOr("KME_ID_A",      "KME-A");
+    std::string kmeIdB    = envOr("KME_ID_B",      "KME-B");
+
     CommandLine cmd(__FILE__);
-    cmd.AddValue("port",    "HTTPS port for curl access",    curlPort);
-    cmd.AddValue("simTime", "Simulation time in seconds",    simTime);
-    cmd.AddValue("cert",    "Path to TLS certificate (PEM)", certFile);
-    cmd.AddValue("key",     "Path to TLS private key (PEM)", keyFile);
+    cmd.AddValue("port",      "HTTPS port for curl access",    curlPort);
+    cmd.AddValue("simTime",   "Simulation time in seconds",    simTime);
+    cmd.AddValue("cert",      "Path to TLS certificate (PEM)", certFile);
+    cmd.AddValue("key",       "Path to TLS private key (PEM)", keyFile);
+    cmd.AddValue("masterSae", "Master SAE ID",                  masterSae);
+    cmd.AddValue("slaveSae",  "Slave/Peer SAE ID",              slaveSae);
+    cmd.AddValue("kmeIdA",    "KME ID for master SAE",          kmeIdA);
+    cmd.AddValue("kmeIdB",    "KME ID for slave SAE",           kmeIdB);
     cmd.Parse(argc, argv);
 
     GlobalValue::Bind("SimulatorImplementationType",
@@ -200,11 +215,14 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    // Register ETSI QKD 014 routes (original working dual KMS setup)
+    // Register ETSI QKD 014 routes (configurable dual KMS setup)
     KmsBridgeHandler handler;
-    handler.AddKmeEndpoint({"KME-A", "alice", "bob", "KME-B", kmsA});
-    handler.AddKmeEndpoint({"KME-B", "bob", "alice", "KME-A", kmsB});
+    handler.AddKmeEndpoint({kmeIdA, masterSae, slaveSae, kmeIdB, kmsA});
+    handler.AddKmeEndpoint({kmeIdB, slaveSae, masterSae, kmeIdA, kmsB});
     handler.RegisterRoutes(svr);
+
+    NS_LOG_UNCOND("Configured SAE IDs: master=" << masterSae << ", slave=" << slaveSae);
+    NS_LOG_UNCOND("Configured KME IDs: " << kmeIdA << " (master), " << kmeIdB << " (slave)");
 
     // Run httplib in a background thread
     std::thread serverThread([&svr, curlPort]() {
@@ -219,11 +237,10 @@ int main(int argc, char* argv[])
         NS_LOG_UNCOND("  POST https://<HOST>:" << curlPort
                       << "/api/v1/keys/{master_SAE_ID}/dec_keys");
         NS_LOG_UNCOND("");
-        NS_LOG_UNCOND("SAE IDs: alice (KME-A), bob (KME-B) — dual KMS");
         NS_LOG_UNCOND("Usage:  curl -k https://localhost:" << curlPort
-                      << "/api/v1/keys/alice/status");
+                      << "/api/v1/keys/{SAE_ID}/status");
         NS_LOG_UNCOND("        curl -k https://localhost:" << curlPort
-                      << "/api/v1/keys/alice/enc_keys?number=3&size=256");
+                      << "/api/v1/keys/{SAE_ID}/enc_keys?number=3&size=256");
         NS_LOG_UNCOND("");
 
         NS_LOG_UNCOND("Attempting to Start the Server: ");
