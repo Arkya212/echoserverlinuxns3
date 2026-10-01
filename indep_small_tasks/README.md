@@ -3,8 +3,6 @@
 Just a small independendent CMake dependent, NS3 independent tasks, testing basic sockets and ideas building an HTTP server.
 
 Benchmarking HTTP Servers: https://github.com/wg/wrk
-Some Nice Articles:
-https://dev.to/saumyaaggarwal/demystifying-socket-programming-build-your-own-http-server-in-c-oa9
 
 Socket Programming Guide:
 We can use this to read about Socket Programming and Start impl small servers from IBM Doc:
