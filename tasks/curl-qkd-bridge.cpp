@@ -2,6 +2,22 @@
  * QKD Key Retrieval via curl - bridges real TCP socket to NS-3 KMS SBuffers
  *
  * Flow: curl -> Real Socket -> NS-3 KMS (SBuffer lookup) -> Real Socket -> curl
+ *
+ * Transport security:
+ *   The server multiplexes HTTPS (mutual TLS) and plain HTTP on the same port
+ *   by peeking the first byte of every accepted connection. A TLS record
+ *   starts with 0x16 (handshake); anything else is treated as plain HTTP.
+ *
+ *   - HTTPS path: the client MUST present a certificate signed by the trusted
+ *     QKD Root CA (authority.pem). If the certificate is missing or does not
+ *     validate, the TLS handshake is rejected and the connection is dropped
+ *     with a console message. An arbitrary client cannot use HTTPS.
+ *   - HTTP path: plain HTTP connections are still served (fallback). This lets
+ *     simple clients retrieve keys without TLS, while HTTPS remains gated by
+ *     mutual certificate validation.
+ *
+ *   If the server's own certificate/key/CA files cannot be loaded at startup,
+ *   the server falls back to HTTP-only mode (no TLS at all).
  */
 
 #include "ns3/core-module.h"
@@ -29,22 +45,30 @@
 #include <condition_variable>
 #include <cstring>
 #include <sstream>
+#include <chrono>
+
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <openssl/x509v3.h>
+#include <openssl/pem.h>
 
 using namespace ns3;
 
 NS_LOG_COMPONENT_DEFINE("CurlQKDBridge");
 
 struct CurlRequest
- {
+{
     int clientFd;
+    SSL* ssl;            // nullptr -> plain HTTP on clientFd; non-null -> HTTPS
     std::string method;
     std::string path;
     std::string body;
 };
 
-struct CurlResponse 
+struct CurlResponse
 {
     int clientFd;
+    SSL* ssl;
     int statusCode;
     std::string body;
 };
@@ -58,6 +82,15 @@ std::atomic<bool>        g_running(true);
 Ptr<QKDKeyManagerSystemApplication> g_kmsA = nullptr;
 Ptr<QKDKeyManagerSystemApplication> g_kmsB = nullptr;
 Ptr<QKDEncryptor> g_encryptor = nullptr;
+
+// TLS context (nullptr when running in HTTP-only fallback mode).
+SSL_CTX* g_sslCtx = nullptr;
+std::string g_certFile = "/auto/bausers/aaditya/work/ns3_sim/ns-allinone-3.42/ns-3.42/contrib/echoserverlinuxns3/tasks/certs/self.pem";
+std::string g_keyFile  = "/auto/bausers/aaditya/work/ns3_sim/ns-allinone-3.42/ns-3.42/contrib/echoserverlinuxns3/tasks/certs/self.key";
+std::string g_caFile   = "/auto/bausers/aaditya/work/ns3_sim/ns-allinone-3.42/ns-3.42/contrib/echoserverlinuxns3/tasks/certs/authority.pem";
+
+// Throttles the "Key Generating" log so it prints once per wait episode.
+std::atomic<bool> g_keyWaitLogged(false);
 
 Ptr<SBuffer> FindSBuffer(const std::string& type, Ptr<QKDKeyManagerSystemApplication> kms)
 {
@@ -91,6 +124,14 @@ std::string BuildKeyJson(const std::vector<Ptr<QKDKey>>& keys, Ptr<SBuffer> sBuf
     return jkeys.dump(2);
 }
 
+// Returns true if the QKD SBuffer for the given type/KMS has keys ready,
+// i.e. the buffer exists and holds at least one key.
+static bool KeysReady(const std::string& type, Ptr<QKDKeyManagerSystemApplication> kms)
+{
+    Ptr<SBuffer> sb = FindSBuffer(type, kms);
+    return sb && sb->GetDefaultKeyCount() > 0;
+}
+
 class KmsBridgeApp : public Application
 {
 public:
@@ -107,6 +148,10 @@ public:
 
 private:
     EventId m_pollEvent;
+    // Requests waiting for QKD keys to be generated (Task 3). Touched only
+    // from the simulator thread, so no mutex is required.
+    std::queue<CurlRequest> m_waitQueue;
+    EventId m_waitEvent;
 
     void StartApplication() override
     {
@@ -114,7 +159,11 @@ private:
                                           &KmsBridgeApp::PollRequests, this);
     }
 
-    void StopApplication() override { Simulator::Cancel(m_pollEvent); }
+    void StopApplication() override
+    {
+        Simulator::Cancel(m_pollEvent);
+        Simulator::Cancel(m_waitEvent);
+    }
 
     void PollRequests()
     {
@@ -126,14 +175,52 @@ private:
             HandleRequest(req);
             lk.lock();
         }
+        EnsureRetry();
         m_pollEvent = Simulator::Schedule(MilliSeconds(50),
                                           &KmsBridgeApp::PollRequests, this);
+    }
+
+    // Park a request until QKD keys are available, then retry it on a
+    // simulator schedule (Task 3). Using a separate member queue (instead
+    // of pushing back into g_reqQueue) avoids a tight busy-loop inside
+    // PollRequests that would stall the simulator and prevent key
+    // generation from ever progressing.
+    void ParkForKeys(const CurlRequest& req)
+    {
+        m_waitQueue.push(req);
+    }
+
+    // Make sure exactly one retry event is pending whenever there are parked
+    // requests. Called after every poll/retry pass so it never double-books.
+    void EnsureRetry()
+    {
+        if (!m_waitQueue.empty() && !m_waitEvent.IsRunning()) {
+            m_waitEvent = Simulator::Schedule(MilliSeconds(50),
+                                              &KmsBridgeApp::RetryWaiting,
+                                              this);
+        }
+    }
+
+    // Re-examine parked requests once keys may have been generated. Ready
+    // requests are processed (and answered); still-empty ones are parked
+    // again and the retry is rescheduled.
+    void RetryWaiting()
+    {
+        std::queue<CurlRequest> pending;
+        pending.swap(m_waitQueue);
+        while (!pending.empty()) {
+            CurlRequest req = pending.front();
+            pending.pop();
+            HandleRequest(req);
+        }
+        EnsureRetry();
     }
 
     void HandleRequest(const CurlRequest& req)
     {
         NS_LOG_INFO("Processing: " << req.method << " " << req.path
-                    << " at sim-time " << Simulator::Now().GetSeconds() << "s");
+                    << " at sim-time " << Simulator::Now().GetSeconds() << "s"
+                    << (req.ssl ? " [HTTPS]" : " [HTTP]"));
 
         std::string respBody;
         int status = 200;
@@ -144,9 +231,28 @@ private:
             targetKms = g_kmsB;
         }
 
-        if (req.path.find("/enc_keys") != std::string::npos) {
+        bool isEncKeys = req.path.find("/enc_keys") != std::string::npos;
+        bool isDecKeys = req.path.find("/dec_keys") != std::string::npos;
+
+        // Task 3: key-fetch endpoints must wait until keys are available.
+        if (isEncKeys || isDecKeys) {
+            const std::string bufType = isEncKeys
+                ? std::string("enc") : std::string("dec");
+            if (!KeysReady(bufType, targetKms)) {
+                if (!g_keyWaitLogged.exchange(true)) {
+                    NS_LOG_UNCOND("Key Generating, please wait...");
+                }
+                ParkForKeys(req);
+                return;
+            }
+            if (g_keyWaitLogged.exchange(false)) {
+                NS_LOG_UNCOND("Keys ready, processing request.");
+            }
+        }
+
+        if (isEncKeys) {
             respBody = DoGetKeys(req, targetKms);
-        } else if (req.path.find("/dec_keys") != std::string::npos) {
+        } else if (isDecKeys) {
             respBody = DoGetKeysByIds(req, targetKms);
         } else if (req.path.find("/status") != std::string::npos) {
             respBody = DoStatus(targetKms);
@@ -164,7 +270,7 @@ private:
         }
 
         std::lock_guard<std::mutex> lk(g_respMtx);
-        g_respQueue.push({req.clientFd, status, respBody});
+        g_respQueue.push({req.clientFd, req.ssl, status, respBody});
         g_respCV.notify_one();
     }
 
@@ -254,6 +360,82 @@ private:
 
 NS_OBJECT_ENSURE_REGISTERED(KmsBridgeApp);
 
+// Build the TLS server context. Loads the server cert/key and the CA used to
+// verify client certificates. Returns nullptr on any failure (HTTP fallback).
+static SSL_CTX* InitSslContext()
+{
+    SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
+    if (!ctx) {
+        NS_LOG_UNCOND("SSL_CTX_new failed: " << ERR_error_string(ERR_get_error(), nullptr));
+        return nullptr;
+    }
+
+    SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+    SSL_CTX_set_mode(ctx, SSL_MODE_AUTO_RETRY);
+
+    if (SSL_CTX_use_certificate_file(ctx, g_certFile.c_str(), SSL_FILETYPE_PEM) <= 0) {
+        NS_LOG_UNCOND("Failed to load server certificate (" << g_certFile << "): "
+                      << ERR_error_string(ERR_get_error(), nullptr));
+        SSL_CTX_free(ctx);
+        return nullptr;
+    }
+    if (SSL_CTX_use_PrivateKey_file(ctx, g_keyFile.c_str(), SSL_FILETYPE_PEM) <= 0) {
+        NS_LOG_UNCOND("Failed to load server private key (" << g_keyFile << "): "
+                      << ERR_error_string(ERR_get_error(), nullptr));
+        SSL_CTX_free(ctx);
+        return nullptr;
+    }
+    if (SSL_CTX_load_verify_locations(ctx, g_caFile.c_str(), nullptr) <= 0) {
+        NS_LOG_UNCOND("Failed to load CA (" << g_caFile << "): "
+                      << ERR_error_string(ERR_get_error(), nullptr));
+        SSL_CTX_free(ctx);
+        return nullptr;
+    }
+
+    // Require and verify the client certificate against the trusted CA.
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, nullptr);
+    SSL_CTX_set_client_CA_list(ctx, SSL_load_client_CA_file(g_caFile.c_str()));
+
+    return ctx;
+}
+
+// Read a complete HTTP request. Uses SSL_read when ssl != nullptr, read() for
+// plain HTTP. Handles Content-Length to ensure the full body is received.
+static bool ReadHttpRequest(int fd, SSL* ssl, std::string& raw)
+{
+    char buf[8192] = {};
+    ssize_t nr;
+    if (ssl) {
+        nr = SSL_read(ssl, buf, sizeof(buf) - 1);
+    } else {
+        nr = read(fd, buf, sizeof(buf) - 1);
+    }
+    if (nr <= 0) return false;
+    raw.append(buf, nr);
+
+    // Check if we have Content-Length and need to read more
+    size_t clPos = raw.find("Content-Length: ");
+    if (clPos != std::string::npos) {
+        size_t clEnd = raw.find("\r\n", clPos);
+        int contentLen = std::stoi(raw.substr(clPos + 16, clEnd - clPos - 16));
+        size_t headerEnd = raw.find("\r\n\r\n");
+        if (headerEnd != std::string::npos) {
+            int bodyReceived = static_cast<int>(raw.size() - (headerEnd + 4));
+            while (bodyReceived < contentLen) {
+                if (ssl) {
+                    nr = SSL_read(ssl, buf, sizeof(buf) - 1);
+                } else {
+                    nr = read(fd, buf, sizeof(buf) - 1);
+                }
+                if (nr <= 0) break;
+                raw.append(buf, nr);
+                bodyReceived += static_cast<int>(nr);
+            }
+        }
+    }
+    return true;
+}
+
 void TcpAcceptThread(uint16_t port)
 {
     int serverFd = socket(AF_INET, SOCK_STREAM, 0);
@@ -273,12 +455,21 @@ void TcpAcceptThread(uint16_t port)
     listen(serverFd, 10);
 
     NS_LOG_UNCOND("");
-    NS_LOG_UNCOND("=== QKD Key Server listening on port " << port << " ===");
+    if (g_sslCtx) {
+        NS_LOG_UNCOND("=== QKD Key Server (HTTPS + HTTP fallback) on port "
+                      << port << " ===");
+        NS_LOG_UNCOND("Mutual TLS: client cert verified against "
+                      << g_caFile);
+    } else {
+        NS_LOG_UNCOND("=== QKD Key Server (HTTP-only fallback) on port "
+                      << port << " ===");
+        NS_LOG_UNCOND("TLS disabled - server certificates not loaded.");
+    }
     NS_LOG_UNCOND("Endpoints:");
-    NS_LOG_UNCOND("  GET  http://<HOST>:" << port << "/api/v1/keys/any/status");
-    NS_LOG_UNCOND("  GET  http://<HOST>:" << port << "/api/v1/keys/any/enc_keys");
-    NS_LOG_UNCOND("  GET  http://<HOST>:" << port << "/api/v1/keys/any/enc_keys/number/3");
-    NS_LOG_UNCOND("  POST http://<HOST>:" << port << "/api/v1/keys/any/dec_keys");
+    NS_LOG_UNCOND("  GET  http(s)://<HOST>:" << port << "/api/v1/keys/any/status");
+    NS_LOG_UNCOND("  GET  http(s)://<HOST>:" << port << "/api/v1/keys/any/enc_keys");
+    NS_LOG_UNCOND("  GET  http(s)://<HOST>:" << port << "/api/v1/keys/any/enc_keys/number/3");
+    NS_LOG_UNCOND("  POST http(s)://<HOST>:" << port << "/api/v1/keys/any/dec_keys");
     NS_LOG_UNCOND("");
 
     while (g_running) {
@@ -294,28 +485,53 @@ void TcpAcceptThread(uint16_t port)
         int cfd = accept(serverFd, (sockaddr*)&caddr, &clen);
         if (cfd < 0) continue;
 
-        // Read HTTP request (may need multiple reads for POST body)
-        std::string raw;
-        char buf[8192] = {};
-        ssize_t nr = read(cfd, buf, sizeof(buf) - 1);
-        if (nr <= 0) { close(cfd); continue; }
-        raw.append(buf, nr);
+        // Peek the first byte to detect TLS (0x16 = TLS handshake) vs HTTP.
+        SSL* ssl = nullptr;
+        if (g_sslCtx) {
+            char firstByte = 0;
+            ssize_t peeked = recv(cfd, &firstByte, 1, MSG_PEEK);
+            if (peeked <= 0) { close(cfd); continue; }
 
-        // Check if we have Content-Length and need to read more
-        size_t clPos = raw.find("Content-Length: ");
-        if (clPos != std::string::npos) {
-            size_t clEnd = raw.find("\r\n", clPos);
-            int contentLen = std::stoi(raw.substr(clPos + 16, clEnd - clPos - 16));
-            size_t headerEnd = raw.find("\r\n\r\n");
-            if (headerEnd != std::string::npos) {
-                int bodyReceived = raw.size() - (headerEnd + 4);
-                while (bodyReceived < contentLen) {
-                    nr = read(cfd, buf, sizeof(buf) - 1);
-                    if (nr <= 0) break;
-                    raw.append(buf, nr);
-                    bodyReceived += nr;
+            if (static_cast<unsigned char>(firstByte) == 0x16) {
+                // TLS connection - require a valid client certificate.
+                ssl = SSL_new(g_sslCtx);
+                if (!ssl) { close(cfd); continue; }
+                SSL_set_fd(ssl, cfd);
+
+                if (SSL_accept(ssl) <= 0) {
+                    long vrf = SSL_get_verify_result(ssl);
+                    if (vrf == X509_V_OK) {
+                        NS_LOG_UNCOND("HTTPS rejected: client certificate "
+                                      "NOT found or handshake failed.");
+                    } else {
+                        NS_LOG_UNCOND("HTTPS rejected: client certificate "
+                                      "did not match ("
+                                      << X509_verify_cert_error_string(vrf)
+                                      << ").");
+                    }
+                    ERR_clear_error();
+                    SSL_free(ssl);
+                    close(cfd);
+                    continue;
                 }
+
+                X509* peer = SSL_get_peer_certificate(ssl);
+                if (!peer) {
+                    NS_LOG_UNCOND("HTTPS rejected: client certificate "
+                                  "NOT found - connection dropped.");
+                    SSL_free(ssl);
+                    close(cfd);
+                    continue;
+                }
+                X509_free(peer);
             }
+        }
+
+        std::string raw;
+        if (!ReadHttpRequest(cfd, ssl, raw)) {
+            if (ssl) { SSL_free(ssl); }
+            close(cfd);
+            continue;
         }
 
         std::string method = raw.substr(0, raw.find(' '));
@@ -330,7 +546,7 @@ void TcpAcceptThread(uint16_t port)
 
         {
             std::lock_guard<std::mutex> lk(g_reqMtx);
-            g_reqQueue.push({cfd, method, path, body});
+            g_reqQueue.push({cfd, ssl, method, path, body});
         }
     }
     close(serverFd);
@@ -355,8 +571,15 @@ void TcpResponseThread()
                  << "Connection: close\r\n\r\n"
                  << r.body;
             std::string s = http.str();
-            ssize_t wr = write(r.clientFd, s.c_str(), s.size());
-            (void)wr;
+            if (r.ssl) {
+                SSL_write(r.ssl, s.c_str(),
+                          static_cast<int>(s.size()));
+                SSL_shutdown(r.ssl);
+                SSL_free(r.ssl);
+            } else {
+                ssize_t wr = write(r.clientFd, s.c_str(), s.size());
+                (void)wr;
+            }
             close(r.clientFd);
 
             lk.lock();
@@ -371,8 +594,12 @@ int main(int argc, char* argv[])
     ss -tulnp
     lists all the processes that are listening on diff ports. If we use any Port
     that is already listed in the output, we get a bind error.
+    [TODO: This change has not been pushed to remote repo, please look into it later]
+
+    One imp thing is: the curlPort is a TCP Port, but it can share the same socket number
+    as a UDP port. Apparently, diff protocols can share same port numbers
     */
-    uint16_t curlPort = 43417;
+    uint16_t curlPort = 8080; //This port is not being used by std httpd of Apache Server so its ok to use this
     double simTime = 600.0;
     uint32_t ppKeySize = 512;
     std::string ppKeyRate = "100kbps";
@@ -381,12 +608,29 @@ int main(int argc, char* argv[])
     uint32_t numberOfKeyToFetchFromKMS = 3;
 
     CommandLine cmd(__FILE__);
-    cmd.AddValue("port", "HTTP port for curl access", curlPort);
+    cmd.AddValue("port", "HTTP/HTTPS port for curl access", curlPort);
     cmd.AddValue("simTime", "Simulation time in seconds", simTime);
+    cmd.AddValue("cert", "Server TLS certificate (PEM)", g_certFile);
+    cmd.AddValue("key", "Server TLS private key (PEM)", g_keyFile);
+    cmd.AddValue("cacert", "CA cert to verify client certs (PEM)", g_caFile);
     cmd.Parse(argc, argv);
 
     GlobalValue::Bind("SimulatorImplementationType",
                       StringValue("ns3::RealtimeSimulatorImpl"));
+
+    // Initialize OpenSSL and the TLS context. On any failure the server
+    // transparently falls back to HTTP-only mode.
+    SSL_library_init();
+    SSL_load_error_strings();
+    OpenSSL_add_all_algorithms();
+    g_sslCtx = InitSslContext();
+    if (g_sslCtx) {
+        NS_LOG_UNCOND("TLS enabled: cert=" << g_certFile
+                      << " key=" << g_keyFile
+                      << " cacert=" << g_caFile);
+    } else {
+        NS_LOG_UNCOND("TLS disabled - serving HTTP only (fallback).");
+    }
 
     // Create 9 nodes (same topology as etsi_014 example)
     NodeContainer n;
@@ -532,5 +776,10 @@ int main(int argc, char* argv[])
 
     QLinkHelper.PrintGraphs();
     Simulator::Destroy();
+
+    if (g_sslCtx) {
+        SSL_CTX_free(g_sslCtx);
+    }
+    EVP_cleanup();
     return 0;
 }
