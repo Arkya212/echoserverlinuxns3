@@ -1,5 +1,6 @@
 find_package(OpenSSL REQUIRED)
 find_package(Threads REQUIRED)
+# find_package(nlohmann_json REQUIRED)
 
 set(MY_EXECUTABLES
     "main"
@@ -46,7 +47,7 @@ set(LIBRARY_INCLUDES
 #     endif()
 # endforeach()
 
-# ── QKD bridge using cpp-httplib SSLServer (HTTPS) ──
+# QKD bridge using cpp-httplib SSLServer (HTTPS) 
 if(OpenSSL_FOUND)
     build_lib_example(
         NAME curl_qkd_bridge_httplib
