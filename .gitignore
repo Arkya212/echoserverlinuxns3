@@ -9,3 +9,6 @@ external/cpp-httplib*
 *pem
 *key
 *srl
+*csr
+*ext
+root*
