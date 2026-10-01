@@ -1,6 +1,11 @@
 build/
-external/cpp-*
-certs/
-*.pem
+# external/cpp-*
+# certs/
+# *.pem
 *.gz
 *.tar
+indep_small_tasks/
+external/cpp-httplib*
+*pem
+*key
+*srl
