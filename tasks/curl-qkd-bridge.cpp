@@ -8,10 +8,11 @@
  *   by peeking the first byte of every accepted connection. A TLS record
  *   starts with 0x16 (handshake); anything else is treated as plain HTTP.
  *
- *   - HTTPS path: the client MUST present a certificate signed by the trusted
- *     QKD Root CA (authority.pem). If the certificate is missing or does not
- *     validate, the TLS handshake is rejected and the connection is dropped
- *     with a console message. An arbitrary client cannot use HTTPS.
+ *   - HTTPS path: the server presents its machine certificate signed by the
+ *     trusted QKD Root CA (authority.pem), and the client MUST present its own
+ *     client certificate signed by that same CA. If the client certificate is
+ *     missing or does not validate, the TLS handshake is rejected and the
+ *     connection is dropped with a console message.
  *   - HTTP path: plain HTTP connections are still served (fallback). This lets
  *     simple clients retrieve keys without TLS, while HTTPS remains gated by
  *     mutual certificate validation.
@@ -85,8 +86,8 @@ Ptr<QKDEncryptor> g_encryptor = nullptr;
 
 // TLS context (nullptr when running in HTTP-only fallback mode).
 SSL_CTX* g_sslCtx = nullptr;
-std::string g_certFile = "/auto/bausers/aaditya/work/ns3_sim/ns-allinone-3.42/ns-3.42/contrib/echoserverlinuxns3/tasks/certs/self.pem";
-std::string g_keyFile  = "/auto/bausers/aaditya/work/ns3_sim/ns-allinone-3.42/ns-3.42/contrib/echoserverlinuxns3/tasks/certs/self.key";
+std::string g_certFile = "/auto/bausers/aaditya/work/ns3_sim/ns-allinone-3.42/ns-3.42/contrib/echoserverlinuxns3/tasks/certs/machine_cert.pem";
+std::string g_keyFile  = "/auto/bausers/aaditya/work/ns3_sim/ns-allinone-3.42/ns-3.42/contrib/echoserverlinuxns3/tasks/certs/machine_key.pem";
 std::string g_caFile   = "/auto/bausers/aaditya/work/ns3_sim/ns-allinone-3.42/ns-3.42/contrib/echoserverlinuxns3/tasks/certs/authority.pem";
 
 // Throttles the "Key Generating" log so it prints once per wait episode.
@@ -299,25 +300,65 @@ private:
         std::vector<Ptr<QKDKey>> keys;
         for (uint32_t i = 0; i < keyNumber; ++i) {
             Ptr<QKDKey> k = sBuffer->GetKey(keySize);
-            if (k) keys.push_back(k);
+            if (k) {
+                keys.push_back(k);
+            }
         }
+
+        NS_LOG_UNCOND("enc_keys served: path=" << req.path
+                      << " returned=" << keys.size()
+                      << " remaining=" << sBuffer->GetDefaultKeyCount());
         return BuildKeyJson(keys, sBuffer);
     }
 
-    // POST /dec_keys - fetch keys by ID from specified KMS dec SBuffer
+    // GET/POST /dec_keys - fetch keys by ID from specified KMS dec SBuffer
+    // Supports two ETSI 014 forms:
+    //   1) POST with JSON body: {"key_IDs":[{"key_ID":"<ID>"}, ...]}
+    //   2) GET with query string: ?key_ID=<ID>  (single key)
     std::string DoGetKeysByIds(const CurlRequest& req, Ptr<QKDKeyManagerSystemApplication> kms)
     {
         Ptr<SBuffer> sBuffer = FindSBuffer("dec", kms);
         if (!sBuffer)
             return "{\"error\": \"No dec SBuffer found\"}";
 
-        nlohmann::json jbody;
-        try { jbody = nlohmann::json::parse(req.body); }
-        catch (...) { return "{\"error\": \"Invalid JSON body\"}"; }
+        std::vector<std::string> keyIds;
+
+        // Form 1: query string ?key_ID=<ID> (ETSI 014 GET form, used by rcpd)
+        size_t qPos = req.path.find('?');
+        if (qPos != std::string::npos) {
+            std::string query = req.path.substr(qPos + 1);
+            // Parse key_ID=... from query string
+            size_t kidPos = query.find("key_ID=");
+            if (kidPos != std::string::npos) {
+                size_t valStart = kidPos + 7;
+                size_t valEnd = query.find('&', valStart);
+                if (valEnd == std::string::npos)
+                    valEnd = query.size();
+                std::string kid = query.substr(valStart, valEnd - valStart);
+                if (!kid.empty())
+                    keyIds.push_back(kid);
+            }
+        }
+
+        // Form 2: POST with JSON body {"key_IDs":[{"key_ID":"..."}, ...]}
+        if (keyIds.empty() && !req.body.empty()) {
+            nlohmann::json jbody;
+            try { jbody = nlohmann::json::parse(req.body); }
+            catch (...) { return "{\"error\": \"Invalid JSON body\"}"; }
+
+            if (jbody.contains("key_IDs")) {
+                for (auto& entry : jbody["key_IDs"]) {
+                    if (entry.contains("key_ID"))
+                        keyIds.push_back(entry["key_ID"].get<std::string>());
+                }
+            }
+        }
+
+        if (keyIds.empty())
+            return "{\"error\": \"No key_IDs provided (use ?key_ID=<ID> or POST JSON body)\"}";
 
         std::vector<Ptr<QKDKey>> keys;
-        for (auto& entry : jbody["key_IDs"]) {
-            std::string kid = entry["key_ID"];
+        for (const auto& kid : keyIds) {
             Ptr<QKDKey> k = sBuffer->GetKey(kid, false);
             if (!k) {
                 nlohmann::json e;
@@ -327,6 +368,10 @@ private:
             }
             keys.push_back(k);
         }
+
+        NS_LOG_UNCOND("dec_keys served: path=" << req.path
+                      << " returned=" << keys.size()
+                      << " remaining=" << sBuffer->GetDefaultKeyCount());
         return BuildKeyJson(keys, sBuffer);
     }
 
@@ -600,7 +645,7 @@ int main(int argc, char* argv[])
     as a UDP port. Apparently, diff protocols can share same port numbers
     */
     uint16_t curlPort = 8080; //This port is not being used by std httpd of Apache Server so its ok to use this
-    double simTime = 600.0;
+    double simTime = 1'000'000'000.0; // server runs for 31.7 years :)
     uint32_t ppKeySize = 512;
     std::string ppKeyRate = "100kbps";
     uint32_t ppPacketSize = 1000;
