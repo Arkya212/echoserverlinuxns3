@@ -53,7 +53,26 @@
 #include <openssl/x509v3.h>
 #include <openssl/pem.h>
 
+#include <chrono>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
+
 using namespace ns3;
+
+// Helper function to get current real-world timestamp in format: YYYY-MM-DD HH:MM:SS
+static std::string GetRealTimestamp()
+{
+    auto now = std::chrono::system_clock::now();
+    auto now_time_t = std::chrono::system_clock::to_time_t(now);
+    auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()) % 1000;
+
+    std::stringstream ss;
+    ss << std::put_time(std::localtime(&now_time_t), "%Y-%m-%d %H:%M:%S");
+    ss << '.' << std::setfill('0') << std::setw(3) << now_ms.count();
+    return ss.str();
+}
 
 NS_LOG_COMPONENT_DEFINE("CurlQKDBridge");
 
@@ -241,13 +260,13 @@ private:
                 ? std::string("enc") : std::string("dec");
             if (!KeysReady(bufType, targetKms)) {
                 if (!g_keyWaitLogged.exchange(true)) {
-                    NS_LOG_UNCOND("Key Generating, please wait...");
+                    NS_LOG_UNCOND("[" << GetRealTimestamp() << "] Key Generating, please wait...");
                 }
                 ParkForKeys(req);
                 return;
             }
             if (g_keyWaitLogged.exchange(false)) {
-                NS_LOG_UNCOND("Keys ready, processing request.");
+                NS_LOG_UNCOND("[" << GetRealTimestamp() << "] Keys ready, processing request.");
             }
         }
 
@@ -305,7 +324,7 @@ private:
             }
         }
 
-        NS_LOG_UNCOND("enc_keys served: path=" << req.path
+        NS_LOG_UNCOND("[" << GetRealTimestamp() << "] enc_keys served: path=" << req.path
                       << " returned=" << keys.size()
                       << " remaining=" << sBuffer->GetDefaultKeyCount());
         return BuildKeyJson(keys, sBuffer);
@@ -369,7 +388,7 @@ private:
             keys.push_back(k);
         }
 
-        NS_LOG_UNCOND("dec_keys served: path=" << req.path
+        NS_LOG_UNCOND("[" << GetRealTimestamp() << "] dec_keys served: path=" << req.path
                       << " returned=" << keys.size()
                       << " remaining=" << sBuffer->GetDefaultKeyCount());
         return BuildKeyJson(keys, sBuffer);
@@ -411,7 +430,7 @@ static SSL_CTX* InitSslContext()
 {
     SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
     if (!ctx) {
-        NS_LOG_UNCOND("SSL_CTX_new failed: " << ERR_error_string(ERR_get_error(), nullptr));
+        NS_LOG_UNCOND("[" << GetRealTimestamp() << "] SSL_CTX_new failed: " << ERR_error_string(ERR_get_error(), nullptr));
         return nullptr;
     }
 
@@ -419,19 +438,19 @@ static SSL_CTX* InitSslContext()
     SSL_CTX_set_mode(ctx, SSL_MODE_AUTO_RETRY);
 
     if (SSL_CTX_use_certificate_file(ctx, g_certFile.c_str(), SSL_FILETYPE_PEM) <= 0) {
-        NS_LOG_UNCOND("Failed to load server certificate (" << g_certFile << "): "
+        NS_LOG_UNCOND("[" << GetRealTimestamp() << "] Failed to load server certificate (" << g_certFile << "): "
                       << ERR_error_string(ERR_get_error(), nullptr));
         SSL_CTX_free(ctx);
         return nullptr;
     }
     if (SSL_CTX_use_PrivateKey_file(ctx, g_keyFile.c_str(), SSL_FILETYPE_PEM) <= 0) {
-        NS_LOG_UNCOND("Failed to load server private key (" << g_keyFile << "): "
+        NS_LOG_UNCOND("[" << GetRealTimestamp() << "] Failed to load server private key (" << g_keyFile << "): "
                       << ERR_error_string(ERR_get_error(), nullptr));
         SSL_CTX_free(ctx);
         return nullptr;
     }
     if (SSL_CTX_load_verify_locations(ctx, g_caFile.c_str(), nullptr) <= 0) {
-        NS_LOG_UNCOND("Failed to load CA (" << g_caFile << "): "
+        NS_LOG_UNCOND("[" << GetRealTimestamp() << "] Failed to load CA (" << g_caFile << "): "
                       << ERR_error_string(ERR_get_error(), nullptr));
         SSL_CTX_free(ctx);
         return nullptr;
@@ -501,20 +520,20 @@ void TcpAcceptThread(uint16_t port)
 
     NS_LOG_UNCOND("");
     if (g_sslCtx) {
-        NS_LOG_UNCOND("=== QKD Key Server (HTTPS + HTTP fallback) on port "
+        NS_LOG_UNCOND("[" << GetRealTimestamp() << "] === QKD Key Server (HTTPS + HTTP fallback) on port "
                       << port << " ===");
-        NS_LOG_UNCOND("Mutual TLS: client cert verified against "
+        NS_LOG_UNCOND("[" << GetRealTimestamp() << "] Mutual TLS: client cert verified against "
                       << g_caFile);
     } else {
-        NS_LOG_UNCOND("=== QKD Key Server (HTTP-only fallback) on port "
+        NS_LOG_UNCOND("[" << GetRealTimestamp() << "] === QKD Key Server (HTTP-only fallback) on port "
                       << port << " ===");
-        NS_LOG_UNCOND("TLS disabled - server certificates not loaded.");
+        NS_LOG_UNCOND("[" << GetRealTimestamp() << "] TLS disabled - server certificates not loaded.");
     }
-    NS_LOG_UNCOND("Endpoints:");
-    NS_LOG_UNCOND("  GET  http(s)://<HOST>:" << port << "/api/v1/keys/any/status");
-    NS_LOG_UNCOND("  GET  http(s)://<HOST>:" << port << "/api/v1/keys/any/enc_keys");
-    NS_LOG_UNCOND("  GET  http(s)://<HOST>:" << port << "/api/v1/keys/any/enc_keys/number/3");
-    NS_LOG_UNCOND("  POST http(s)://<HOST>:" << port << "/api/v1/keys/any/dec_keys");
+    NS_LOG_UNCOND("[" << GetRealTimestamp() << "] Endpoints:");
+    NS_LOG_UNCOND("[" << GetRealTimestamp() << "]   GET  http(s)://<HOST>:" << port << "/api/v1/keys/any/status");
+    NS_LOG_UNCOND("[" << GetRealTimestamp() << "]   GET  http(s)://<HOST>:" << port << "/api/v1/keys/any/enc_keys");
+    NS_LOG_UNCOND("[" << GetRealTimestamp() << "]   GET  http(s)://<HOST>:" << port << "/api/v1/keys/any/enc_keys/number/3");
+    NS_LOG_UNCOND("[" << GetRealTimestamp() << "]   POST http(s)://<HOST>:" << port << "/api/v1/keys/any/dec_keys");
     NS_LOG_UNCOND("");
 
     while (g_running) {
@@ -546,10 +565,10 @@ void TcpAcceptThread(uint16_t port)
                 if (SSL_accept(ssl) <= 0) {
                     long vrf = SSL_get_verify_result(ssl);
                     if (vrf == X509_V_OK) {
-                        NS_LOG_UNCOND("HTTPS rejected: client certificate "
+                        NS_LOG_UNCOND("[" << GetRealTimestamp() << "] HTTPS rejected: client certificate "
                                       "NOT found or handshake failed.");
                     } else {
-                        NS_LOG_UNCOND("HTTPS rejected: client certificate "
+                        NS_LOG_UNCOND("[" << GetRealTimestamp() << "] HTTPS rejected: client certificate "
                                       "did not match ("
                                       << X509_verify_cert_error_string(vrf)
                                       << ").");
@@ -562,7 +581,7 @@ void TcpAcceptThread(uint16_t port)
 
                 X509* peer = SSL_get_peer_certificate(ssl);
                 if (!peer) {
-                    NS_LOG_UNCOND("HTTPS rejected: client certificate "
+                    NS_LOG_UNCOND("[" << GetRealTimestamp() << "] HTTPS rejected: client certificate "
                                   "NOT found - connection dropped.");
                     SSL_free(ssl);
                     close(cfd);
@@ -647,10 +666,11 @@ int main(int argc, char* argv[])
     uint16_t curlPort = 8080; //This port is not being used by std httpd of Apache Server so its ok to use this
     double simTime = 1'000'000'000.0; // server runs for 31.7 years :)
     uint32_t ppKeySize = 512;
-    std::string ppKeyRate = "100kbps";
+    std::string ppKeyRate = "800kbps";
     uint32_t ppPacketSize = 1000;
     std::string ppRate = "1Mbps";
-    uint32_t numberOfKeyToFetchFromKMS = 3;
+    // this can't be 0 else app crashes.
+    // uint32_t numberOfKeyToFetchFromKMS = 1; // Not used - crypto app disabled
 
     CommandLine cmd(__FILE__);
     cmd.AddValue("port", "HTTP/HTTPS port for curl access", curlPort);
@@ -670,11 +690,11 @@ int main(int argc, char* argv[])
     OpenSSL_add_all_algorithms();
     g_sslCtx = InitSslContext();
     if (g_sslCtx) {
-        NS_LOG_UNCOND("TLS enabled: cert=" << g_certFile
+        NS_LOG_UNCOND("[" << GetRealTimestamp() << "] TLS enabled: cert=" << g_certFile
                       << " key=" << g_keyFile
                       << " cacert=" << g_caFile);
     } else {
-        NS_LOG_UNCOND("TLS disabled - serving HTTP only (fallback).");
+        NS_LOG_UNCOND("[" << GetRealTimestamp() << "] TLS disabled - serving HTTP only (fallback).");
     }
 
     // Create 9 nodes (same topology as etsi_014 example)
@@ -745,7 +765,7 @@ int main(int argc, char* argv[])
 
     Ptr<QKDControl> ctrlA = QLinkHelper.InstallQKDNController(n.Get(5));
     Ptr<QKDControl> ctrlB = QLinkHelper.InstallQKDNController(n.Get(6));
-    QLinkHelper.ConfigureQBuffers({ctrlA, ctrlB}, 1024, 1800, 500000000, 512);
+    QLinkHelper.ConfigureQBuffers({ctrlA, ctrlB}, 1024, 1800, 1000000000, 512);
 
     QAHelper.InstallKeyManager(n.Get(3), i3i4.GetAddress(0), 80, ctrlA);
     QAHelper.InstallKeyManager(n.Get(4), i3i4.GetAddress(1), 80, ctrlB);
@@ -754,8 +774,8 @@ int main(int argc, char* argv[])
     g_kmsA = n.Get(3)->GetApplication(0)->GetObject<QKDKeyManagerSystemApplication>();
     g_kmsB = n.Get(4)->GetApplication(0)->GetObject<QKDKeyManagerSystemApplication>();
 
-    NS_LOG_UNCOND("KMS-A on node 3, IP: " << i3i4.GetAddress(0));
-    NS_LOG_UNCOND("KMS-B on node 4, IP: " << i3i4.GetAddress(1));
+    NS_LOG_UNCOND("[" << GetRealTimestamp() << "] KMS-A on node 3, IP: " << i3i4.GetAddress(0));
+    NS_LOG_UNCOND("[" << GetRealTimestamp() << "] KMS-B on node 4, IP: " << i3i4.GetAddress(1));
 
     // Post-processing applications (key generation)
     ApplicationContainer ppApps;
@@ -772,7 +792,11 @@ int main(int argc, char* argv[])
     ppApps.Start(Seconds(1.0));
     ppApps.Stop(Seconds(simTime - 5));
 
-    // Crypto applications (consume keys from KMS)
+    // Crypto applications (consume keys from KMS) - DISABLED
+    // We want keys available only for external HTTP requests (curl/rcpd),
+    // not consumed by internal NS3 crypto app.
+    // KME still exchanges keys via QKD link (post-processing app below).
+    /*
     Config::SetDefault("ns3::QKDApp014::NumberOfKeyToFetchFromKMS",
                        UintegerValue(numberOfKeyToFetchFromKMS));
     Config::SetDefault("ns3::QKDApp014::AuthenticationType", UintegerValue(1));
@@ -787,10 +811,11 @@ int main(int argc, char* argv[])
         InetSocketAddress(i0i1.GetAddress(0), commPort),
         InetSocketAddress(i1i2.GetAddress(1), commPort),
         n.Get(5), n.Get(6),
-        "tcp", 1000, DataRate("100kbps"), "etsi014"
+        "tcp", 1000, DataRate("100bps"), "etsi014"
     ));
     cryptoApps.Start(Seconds(5.0));
     cryptoApps.Stop(Seconds(simTime - 5));
+    */
 
     Ipv4GlobalRoutingHelper::PopulateRoutingTables();
     QLinkHelper.CreateTopologyGraph({ctrlA, ctrlB});
@@ -808,8 +833,8 @@ int main(int argc, char* argv[])
     std::thread respThread(TcpResponseThread);
 
     NS_LOG_UNCOND("");
-    NS_LOG_UNCOND("Simulation running for " << simTime << "s. Keys generated after ~2-3s.");
-    NS_LOG_UNCOND("Press Ctrl+C to stop.");
+    NS_LOG_UNCOND("[" << GetRealTimestamp() << "] Simulation running for " << simTime << "s. Keys generated after ~2-3s.");
+    NS_LOG_UNCOND("[" << GetRealTimestamp() << "] Press Ctrl+C to stop.");
 
     Simulator::Stop(Seconds(simTime));
     Simulator::Run();
