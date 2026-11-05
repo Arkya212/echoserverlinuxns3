@@ -83,6 +83,7 @@ struct CurlRequest
     std::string method;
     std::string path;
     std::string body;
+    double parkTime;    // Timestamp when request was parked (for timeout)
 };
 
 struct CurlResponse
@@ -111,6 +112,12 @@ std::string g_caFile   = "/auto/bausers/aaditya/work/ns3_sim/ns-allinone-3.42/ns
 
 // Throttles the "Key Generating" log so it prints once per wait episode.
 std::atomic<bool> g_keyWaitLogged(false);
+
+// Connection throttling and timeout settings
+const uint32_t MAX_WAIT_QUEUE_SIZE = 6; // Max parked requests
+const double REQUEST_TIMEOUT_SEC = 5.0; // Max wait time before dropping
+const uint32_t KEY_THRESHOLD_TO_ACCEPT = 100; // Min keys before accepting requests after generation
+std::atomic<bool> g_inKeyGenMode(false); // When true, drop all requests until threshold reached
 
 Ptr<SBuffer> FindSBuffer(const std::string& type, Ptr<QKDKeyManagerSystemApplication> kms)
 {
@@ -172,17 +179,22 @@ private:
     // from the simulator thread, so no mutex is required.
     std::queue<CurlRequest> m_waitQueue;
     EventId m_waitEvent;
+    EventId m_keyGenCheckEvent; // Periodic check to exit key gen mode when buffer fills
 
     void StartApplication() override
     {
         m_pollEvent = Simulator::Schedule(MilliSeconds(50),
                                           &KmsBridgeApp::PollRequests, this);
+        // Start periodic check to exit key gen mode when buffer fills
+        m_keyGenCheckEvent = Simulator::Schedule(MilliSeconds(100),
+                                                  &KmsBridgeApp::CheckKeyGenMode, this);
     }
 
     void StopApplication() override
     {
         Simulator::Cancel(m_pollEvent);
         Simulator::Cancel(m_waitEvent);
+        Simulator::Cancel(m_keyGenCheckEvent);
     }
 
     void PollRequests()
@@ -207,7 +219,17 @@ private:
     // generation from ever progressing.
     void ParkForKeys(const CurlRequest& req)
     {
-        m_waitQueue.push(req);
+        if (m_waitQueue.size() >= MAX_WAIT_QUEUE_SIZE) {
+            // Queue full - drop the request
+            NS_LOG_UNCOND("[" << GetRealTimestamp() << "] DROP: Wait queue full (" << m_waitQueue.size()
+                          << "), dropping request: " << req.method << " " << req.path);
+            SendErrorResponse(req, 503, "Service Unavailable: Wait queue full");
+            return;
+        }
+
+        CurlRequest parkedReq = req;
+        parkedReq.parkTime = Simulator::Now().GetSeconds();
+        m_waitQueue.push(parkedReq);
     }
 
     // Make sure exactly one retry event is pending whenever there are parked
@@ -223,17 +245,101 @@ private:
 
     // Re-examine parked requests once keys may have been generated. Ready
     // requests are processed (and answered); still-empty ones are parked
-    // again and the retry is rescheduled.
+    // again and the retry is rescheduled. Requests that timeout are dropped.
     void RetryWaiting()
     {
         std::queue<CurlRequest> pending;
+        std::queue<CurlRequest> stillWaiting;
         pending.swap(m_waitQueue);
+
+        double now = Simulator::Now().GetSeconds();
+        uint32_t dropped = 0;
+        uint32_t processed = 0;
+
         while (!pending.empty()) {
             CurlRequest req = pending.front();
             pending.pop();
+
+            // Check timeout
+            if (now - req.parkTime > REQUEST_TIMEOUT_SEC) {
+                NS_LOG_UNCOND("[" << GetRealTimestamp() << "] DROP: Request timeout after "
+                              << (now - req.parkTime) << "s: " << req.method << " " << req.path);
+                SendErrorResponse(req, 504, "Gateway Timeout: Key generation took too long");
+                dropped++;
+                continue;
+            }
+
+            // Try to process the request
             HandleRequest(req);
+            processed++;
         }
+
+        // Put any requests that were re-parked back into the wait queue
+        m_waitQueue.swap(stillWaiting);
+
+        if (dropped > 0) {
+            NS_LOG_UNCOND("[" << GetRealTimestamp() << "] Wait queue stats: dropped=" << dropped
+                          << " processed=" << processed << " remaining=" << m_waitQueue.size());
+        }
+
         EnsureRetry();
+    }
+
+    // Periodic check to exit key generation mode when buffer reaches threshold
+    void CheckKeyGenMode()
+    {
+        if (!g_inKeyGenMode) {
+            // Not in key gen mode, just reschedule
+            m_keyGenCheckEvent = Simulator::Schedule(MilliSeconds(100),
+                                                      &KmsBridgeApp::CheckKeyGenMode, this);
+            return;
+        }
+
+        // Check both alice and bob enc buffers
+        bool thresholdReached = false;
+        for (auto kms : {g_kmsA, g_kmsB}) {
+            if (!kms) continue;
+            Ptr<SBuffer> encBuf = FindSBuffer("enc", kms);
+            if (encBuf && encBuf->GetDefaultKeyCount() >= KEY_THRESHOLD_TO_ACCEPT) {
+                thresholdReached = true;
+                break;
+            }
+        }
+
+        if (thresholdReached) {
+            g_inKeyGenMode = false;
+            NS_LOG_UNCOND("[" << GetRealTimestamp() << "] Key generation mode OFF: buffer reached "
+                          << KEY_THRESHOLD_TO_ACCEPT << " keys, accepting requests");
+        }
+
+        // Reschedule periodic check
+        m_keyGenCheckEvent = Simulator::Schedule(MilliSeconds(100),
+                                                  &KmsBridgeApp::CheckKeyGenMode, this);
+    }
+    void SendErrorResponse(const CurlRequest& req, int statusCode, const std::string& message)
+    {
+        nlohmann::json err;
+        err["error"] = message;
+        err["code"] = statusCode;
+        std::string body = err.dump(2);
+
+        std::ostringstream http;
+        http << "HTTP/1.1 " << statusCode << " " << message << "\r\n"
+             << "Content-Type: application/json\r\n"
+             << "Content-Length: " << body.size() << "\r\n"
+             << "Connection: close\r\n\r\n"
+             << body;
+        std::string s = http.str();
+
+        if (req.ssl) {
+            SSL_write(req.ssl, s.c_str(), static_cast<int>(s.size()));
+            SSL_shutdown(req.ssl);
+            SSL_free(req.ssl);
+        } else {
+            ssize_t wr = write(req.clientFd, s.c_str(), s.size());
+            (void)wr;
+        }
+        close(req.clientFd);
     }
 
     void HandleRequest(const CurlRequest& req)
@@ -254,15 +360,35 @@ private:
         bool isEncKeys = req.path.find("/enc_keys") != std::string::npos;
         bool isDecKeys = req.path.find("/dec_keys") != std::string::npos;
 
+        // Check if we're in key generation mode - drop requests until threshold reached
+        if (g_inKeyGenMode && (isEncKeys || isDecKeys)) {
+            const std::string bufType = isEncKeys ? "enc" : "dec";
+            Ptr<SBuffer> sb = FindSBuffer(bufType, targetKms);
+            if (sb && sb->GetDefaultKeyCount() >= KEY_THRESHOLD_TO_ACCEPT) {
+                // Threshold reached - exit key gen mode
+                g_inKeyGenMode = false;
+                NS_LOG_UNCOND("[" << GetRealTimestamp() << "] Key generation mode OFF: buffer reached "
+                              << sb->GetDefaultKeyCount() << " keys");
+            } else {
+                // Still in key gen mode - drop request
+                SendErrorResponse(req, 503, "Service Unavailable: Key generation in progress");
+                return;
+            }
+        }
+
         // Task 3: key-fetch endpoints must wait until keys are available.
         if (isEncKeys || isDecKeys) {
             const std::string bufType = isEncKeys
                 ? std::string("enc") : std::string("dec");
             if (!KeysReady(bufType, targetKms)) {
-                if (!g_keyWaitLogged.exchange(true)) {
-                    NS_LOG_UNCOND("[" << GetRealTimestamp() << "] Key Generating, please wait...");
+                // Enter key generation mode if not already
+                if (!g_inKeyGenMode.exchange(true)) {
+                    NS_LOG_UNCOND("[" << GetRealTimestamp() << "] Key generation mode ON: buffer empty, dropping until "
+                                  << KEY_THRESHOLD_TO_ACCEPT << " keys accumulated");
                 }
-                ParkForKeys(req);
+                // In key gen mode, drop request immediately without parking
+                // This allows buffer to fill without retry loop interference
+                SendErrorResponse(req, 503, "Service Unavailable: Key generation in progress");
                 return;
             }
             if (g_keyWaitLogged.exchange(false)) {
