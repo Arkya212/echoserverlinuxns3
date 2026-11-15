@@ -106,6 +106,8 @@ Ptr<QKDEncryptor> g_encryptor = nullptr;
 
 // TLS context (nullptr when running in HTTP-only fallback mode).
 SSL_CTX* g_sslCtx = nullptr;
+
+//TODO: These Paths Should be Handled By CMake and NOT by absolute Paths.
 std::string g_certFile = "/auto/bausers/aaditya/work/ns3_sim/ns-allinone-3.42/ns-3.42/contrib/echoserverlinuxns3/tasks/certs/machine_cert.pem";
 std::string g_keyFile  = "/auto/bausers/aaditya/work/ns3_sim/ns-allinone-3.42/ns-3.42/contrib/echoserverlinuxns3/tasks/certs/machine_key.pem";
 std::string g_caFile   = "/auto/bausers/aaditya/work/ns3_sim/ns-allinone-3.42/ns-3.42/contrib/echoserverlinuxns3/tasks/certs/authority.pem";
@@ -611,7 +613,7 @@ static bool ReadHttpRequest(int fd, SSL* ssl, std::string& raw)
         size_t headerEnd = raw.find("\r\n\r\n");
         if (headerEnd != std::string::npos) {
             int bodyReceived = static_cast<int>(raw.size() - (headerEnd + 4));
-            while (bodyReceived < contentLen) {
+            `(bodyReceived < contentLen) {
                 if (ssl) {
                     nr = SSL_read(ssl, buf, sizeof(buf) - 1);
                 } else {
@@ -670,10 +672,24 @@ void TcpAcceptThread(uint16_t port)
         if (select(serverFd + 1, &fds, nullptr, nullptr, &tv) <= 0)
             continue;
 
+        /*
+        Optimization I can think of:
+        Here, the accept() syscall is being polled to check if Accept queue has a packet.
+        But we can do this Asynchronously Non-Blocking manner.
+        Using Epoll or IO_Uring.
+        The Packet TLS decryption etc everything can be handled in the IO_URing cell
+        or epoll can notify the main thread to handle the packet in the accept queue.
+        */
         sockaddr_in caddr;
         socklen_t clen = sizeof(caddr);
         int cfd = accept(serverFd, (sockaddr*)&caddr, &clen);
         if (cfd < 0) continue;
+
+
+        /*
+        Refer this for TLS encryption to a socket.
+        https://opensource.com/article/19/6/cryptography-basics-openssl-part-1
+        */
 
         // Peek the first byte to detect TLS (0x16 = TLS handshake) vs HTTP.
         SSL* ssl = nullptr;
