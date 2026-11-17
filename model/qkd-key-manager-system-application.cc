@@ -623,6 +623,51 @@ QKDKeyManagerSystemApplication::Fill(
 }
 
 Ptr<SBuffer>
+QKDKeyManagerSystemApplication::GetSBufferPublic(uint32_t dstKmNodeId, std::string type)
+{
+  return GetSBuffer(dstKmNodeId, type);
+}
+
+void
+QKDKeyManagerSystemApplication::TriggerSBufferRefill(uint32_t dstKmNodeId)
+{
+  NS_LOG_FUNCTION(this << dstKmNodeId);
+  SBufferClientCheck(dstKmNodeId);
+}
+
+void
+QKDKeyManagerSystemApplication::TopUpSBuffers(uint32_t dstKmNodeId)
+{
+  NS_LOG_FUNCTION(this << dstKmNodeId);
+
+  auto ie = m_keys_enc.find(dstKmNodeId);
+  auto id = m_keys_dec.find(dstKmNodeId);
+  if(ie == m_keys_enc.end() || id == m_keys_dec.end())
+    return;
+  if(ie->second->GetType() != SBuffer::Type::LOCAL_SBUFFER)
+    return;
+
+  Ptr<QBuffer> qBuffer = GetQBuffer(dstKmNodeId);
+  if(!qBuffer || qBuffer->GetState() == 3 || qBuffer->GetBitCount() <= qBuffer->GetMmin())
+    return;
+
+  uint32_t qBufferBits = qBuffer->GetBitCount() - qBuffer->GetMmin();
+  const std::pair<std::string, Ptr<SBuffer>> targets[] = { {"enc", ie->second}, {"dec", id->second} };
+  for(const auto& target : targets)
+  {
+    Ptr<SBuffer> sBuffer = target.second;
+    uint32_t storedBits = sBuffer->GetKeyCount() * sBuffer->GetKeySize(); //Includes INIT keys in flight
+    if(storedBits >= sBuffer->GetMmax())
+      continue;
+    uint32_t demand = std::min(sBuffer->GetMmax() - storedBits, qBufferBits);
+    if(demand < sBuffer->GetKeySize())
+      continue;
+    qBufferBits -= demand;
+    Fill(dstKmNodeId, target.first, demand);
+  }
+}
+
+Ptr<SBuffer>
 QKDKeyManagerSystemApplication::GetSBuffer(uint32_t dstKmNodeId, std::string type)
 {
   NS_LOG_FUNCTION(this << dstKmNodeId << type);
@@ -3603,6 +3648,13 @@ QKDKeyManagerSystemApplication::CreateKeyContainer(std::vector<Ptr<QKDKey>> keys
     }
 
   }
+
+  // Dump served keys to file for external access via curl
+  {
+    std::ofstream keyFile("qkd_served_keys.jsonl", std::ios::app);
+    keyFile << jkeys.dump() << std::endl;
+  }
+
   return jkeys;
 
 }

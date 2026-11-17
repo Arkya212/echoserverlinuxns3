@@ -203,6 +203,29 @@ public:
   }
 
   /**
+   * @brief Get SBuffer for external access (e.g. curl bridge)
+   * @param dstKmNodeId remote KM node ID
+   * @param type "enc" or "dec"
+  * @return Ptr to SBuffer, or nullptr if not found
+  */
+  Ptr<SBuffer> GetSBufferPublic(uint32_t dstKmNodeId, std::string type);
+
+  /**
+   * @brief Trigger a refill check for the SBuffers associated with a peer KMS.
+   * @param dstKmNodeId Remote KM node ID.
+   */
+  void TriggerSBufferRefill(uint32_t dstKmNodeId);
+
+  /**
+   * @brief Proactively top up both LOCAL s-buffers (enc and dec) of a peer link
+   * towards their maximum, regardless of their READY/WARNING state. Keys already
+   * stored (including INIT keys awaiting the peer ack) count against the capacity,
+   * so repeated calls do not over-request.
+   * @param dstKmNodeId remote KM node ID
+   */
+  void TopUpSBuffers(uint32_t dstKmNodeId);
+
+  /**
    * @brief Get address as string
    * @param address address
    * @return string address
@@ -943,4 +966,3 @@ private:
 } // namespace ns3
 
 #endif /* QKD_APPLICATION_H */
-

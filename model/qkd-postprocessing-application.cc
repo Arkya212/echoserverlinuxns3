@@ -815,7 +815,8 @@ QKDPostprocessingApplication::PacketReceived(const Ptr<Packet> &p, const Address
         try{
           jresponse = nlohmann::json::parse(payloadRaw);
         }catch(...){
-          NS_FATAL_ERROR(this << "JSON parse error!");
+          NS_LOG_WARN(this << "JSON parse error - skipping malformed packet");
+          return;
         }
 
         if(jresponse.contains("ACTION")) label = jresponse["ACTION"];

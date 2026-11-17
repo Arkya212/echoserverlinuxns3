@@ -4,8 +4,9 @@ set(NS3_WITH_CRYPTOPP "" CACHE PATH "Build with CRYPTOPP support")
 find_external_library(
   DEPENDENCY_NAME CRYPTOPP
   HEADER_NAME cryptlib.h
-  LIBRARY_NAME crypto++ cryptopp
-  SEARCH_PATHS /usr/include/cryptopp ${NS3_WITH_CRYPTOPP}
+  LIBRARY_NAME cryptopp
+  SEARCH_PATHS /usr/include/cryptopp ${NS3_WITH_CRYPTOPP} $ENV{HOME}/local_deps
+  PATH_SUFFIXES include/cryptopp lib
 )
 
 if(NOT CRYPTOPP_FOUND)

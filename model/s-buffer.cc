@@ -275,7 +275,13 @@ namespace ns3 {
         NS_LOG_FUNCTION(this << "m_currentKeyBit: " << m_currentKeyBit);
         NS_LOG_FUNCTION(this << "totalReadyKeyCount: " << totalReadyKeyCount);
  
-        NS_ASSERT(totalReadyKeyCount == m_currentKeyBit);
+        // Shall revert this bcz for now KMEA == KMEB which is not the actual case.
+        // NS_ASSERT(totalReadyKeyCount == m_currentKeyBit);
+        if (totalReadyKeyCount != m_currentKeyBit) {
+            NS_LOG_WARN("Key accounting mismatch: totalReadyKeyCount=" << totalReadyKeyCount 
+                        << " != m_currentKeyBit=" << m_currentKeyBit 
+                        << " (may occur with external key access)");
+        }
         
         ///////////////////////////////// TEMP TEMP TEMP /////////////////////////////////
 

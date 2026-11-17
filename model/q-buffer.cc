@@ -381,12 +381,10 @@ namespace ns3 {
             uint32_t keyCount = GetKeyCount();
             if(keyCount  >= 1)
             {   //If QBuffer is not empty select a random key
-                if(keyCount == 1)
-                {
-                    random_it = m_keys.begin();
-                } else{
-                    random_it = std::next(std::begin(m_keys), std::rand()%keyCount);
-                }
+                //Bucket order of an unordered_map is already arbitrary; taking begin()
+                //avoids an O(n) std::next() walk per key (stalls the simulator when
+                //the QBuffer holds hundreds of thousands of keys).
+                random_it = m_keys.begin();
                 key = random_it->second;
                 DestroyKey(key->GetId());
                 //Fire traces
