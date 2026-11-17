@@ -21,6 +21,27 @@
  *   the server falls back to HTTP-only mode (no TLS at all).
  */
 
+
+/*
+1 Min 16 requests come into way...
+- Timeout - 2 seconds 
+
+All 16 requests should be served within 2 seconds...
+9624 chassis - 12 cards x2 - TM800EN/400ENB
+
+All 30 requests should be served in 30 seconds... Every min
+
+Run a Script for 30 mins... A start
+
+Fixed SAE ID - We 
+
+TEST CASES ... Remove the Queue
+Please check for 4 Requests ... and then Demo ...
+Fixed Sae ID, and check for 3 ... Today
+...
+*/
+
+
 #include "ns3/core-module.h"
 #include "ns3/network-module.h"
 #include "ns3/internet-module.h"
@@ -45,6 +66,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <cstring>
+#include <csignal>
 #include <sstream>
 #include <chrono>
 
@@ -119,6 +141,7 @@ std::atomic<bool> g_keyWaitLogged(false);
 const uint32_t MAX_WAIT_QUEUE_SIZE = 6; // Max parked requests
 const double REQUEST_TIMEOUT_SEC = 5.0; // Max wait time before dropping
 const uint32_t KEY_THRESHOLD_TO_ACCEPT = 100; // Min keys before accepting requests after generation
+const uint32_t SBUFFER_LOW_WATER_KEYS = 125; // Start proactive top-up below this many READY keys
 std::atomic<bool> g_inKeyGenMode(false); // When true, drop all requests until threshold reached
 
 Ptr<SBuffer> FindSBuffer(const std::string& type, Ptr<QKDKeyManagerSystemApplication> kms)
@@ -127,6 +150,19 @@ Ptr<SBuffer> FindSBuffer(const std::string& type, Ptr<QKDKeyManagerSystemApplica
     for (uint32_t id = 0; id < 20; ++id) {
         Ptr<SBuffer> sb = kms->GetSBufferPublic(id, type);
         if (sb) return sb;
+    }
+    return nullptr;
+}
+
+// Same as FindSBuffer, but also reports the peer KM node id under which the
+// SBuffer is keyed, so callers can address fill triggers precisely.
+Ptr<SBuffer> FindSBufferWithId(const std::string& type, Ptr<QKDKeyManagerSystemApplication> kms,
+                               uint32_t& outPeerId)
+{
+    if (!kms) return nullptr;
+    for (uint32_t id = 0; id < 20; ++id) {
+        Ptr<SBuffer> sb = kms->GetSBufferPublic(id, type);
+        if (sb) { outPeerId = id; return sb; }
     }
     return nullptr;
 }
@@ -161,6 +197,45 @@ static bool KeysReady(const std::string& type, Ptr<QKDKeyManagerSystemApplicatio
     return sb && sb->GetDefaultKeyCount() > 0;
 }
 
+// Diagnostic dump of the full key pipeline for both KMSs:
+// upstream QBuffers (raw generated key material) + enc/dec SBuffers
+// (total keys vs READY keys; INIT keys counted in bits but not in ready).
+// Used to debug "key generation mode" stalls.
+static std::string DumpBufferState()
+{
+    std::ostringstream os;
+    for (int i = 0; i < 2; ++i) {
+        Ptr<QKDKeyManagerSystemApplication> kms = (i == 0) ? g_kmsA : g_kmsB;
+        os << (i == 0 ? "KMS-A " : "KMS-B ");
+        if (!kms) { os << "<null> "; continue; }
+
+        for (const char* t : {"enc", "dec"}) {
+            Ptr<SBuffer> sb = FindSBuffer(t, kms);
+            if (!sb) { os << t << "=<none> "; continue; }
+            os << t << "=[total " << sb->GetKeyCount()
+               << " ready " << sb->GetDefaultKeyCount()
+               << " servable " << sb->GetSKeyCount()
+               << " bits " << sb->GetBitCount()
+               << " sbits " << sb->GetSBitCount()
+               << " state " << sb->GetState()
+               << "] ";
+        }
+
+        std::vector<Ptr<QBuffer>> qbs = kms->GetQBuffersVector();
+        os << "qbufs=[";
+        for (Ptr<QBuffer> qb : qbs) {
+            if (!qb) continue;
+            os << "k" << qb->GetKeyCount()
+               << " b" << qb->GetBitCount()
+               << " s" << qb->GetState()
+               << " mmin" << qb->GetMmin()
+               << " mmax" << qb->GetMmax() << " ";
+        }
+        os << "]  ";
+    }
+    return os.str();
+}
+
 class KmsBridgeApp : public Application
 {
 public:
@@ -182,6 +257,8 @@ private:
     std::queue<CurlRequest> m_waitQueue;
     EventId m_waitEvent;
     EventId m_keyGenCheckEvent; // Periodic check to exit key gen mode when buffer fills
+    uint32_t m_keyGenPrintTicks {0}; // Throttles KEYGEN-WAIT dumps (~1min cadence)
+    uint32_t m_topUpTicks {0}; // Throttles proactive SBuffer top-ups (~1s cadence)
 
     void StartApplication() override
     {
@@ -287,14 +364,64 @@ private:
         EnsureRetry();
     }
 
+    // The KMS only refills an SBuffer once its state degrades, which for the
+    // bridge's direct consumption means "almost empty" (requests then see 503s
+    // while the refill is acked). Top the buffers up early instead, once per
+    // second, from the master KMS (its fill covers both enc and dec directions).
+    void TopUpBuffersIfLow()
+    {
+        if (++m_topUpTicks < 10) {
+            return;
+        }
+        m_topUpTicks = 0;
+
+        bool low = false;
+        uint32_t peerId = 0;
+        for (auto kms : {g_kmsA, g_kmsB}) {
+            for (const char* bufType : {"enc", "dec"}) {
+                Ptr<SBuffer> sb = FindSBuffer(bufType, kms);
+                if (sb && sb->GetDefaultKeyCount() < SBUFFER_LOW_WATER_KEYS) {
+                    low = true;
+                }
+            }
+        }
+        if (low && g_kmsB && FindSBufferWithId("enc", g_kmsB, peerId)) {
+            g_kmsB->TopUpSBuffers(peerId);
+        }
+    }
+
     // Periodic check to exit key generation mode when buffer reaches threshold
     void CheckKeyGenMode()
     {
+        TopUpBuffersIfLow();
+
         if (!g_inKeyGenMode) {
             // Not in key gen mode, just reschedule
             m_keyGenCheckEvent = Simulator::Schedule(MilliSeconds(100),
                                                       &KmsBridgeApp::CheckKeyGenMode, this);
             return;
+        }
+
+        // While in key gen mode, dump full buffer diagnostics every ~1min
+        // so we can see whether the QBuffer has material and whether the
+        // SBuffer fill (QBuffer -> SBuffer) is happening at all.
+        m_keyGenPrintTicks++;
+        if (m_keyGenPrintTicks >= 1000) {
+            m_keyGenPrintTicks = 0;
+            NS_LOG_UNCOND("[" << GetRealTimestamp() << "] KEYGEN-WAIT " << DumpBufferState());
+        }
+
+        // Nudge the fill engine each pass: the bridge drains SBuffers directly,
+        // which the KMS's master-side fill trigger cannot observe on its own.
+        for (auto kms : {g_kmsA, g_kmsB}) {
+            if (!kms) continue;
+            for (const char* bufType : {"enc", "dec"}) {
+                uint32_t peerId = 0;
+                Ptr<SBuffer> sb = FindSBufferWithId(bufType, kms, peerId);
+                if (sb && sb->GetDefaultKeyCount() == 0) {
+                    kms->TriggerSBufferRefill(peerId);
+                }
+            }
         }
 
         // Check both alice and bob enc buffers
@@ -312,6 +439,7 @@ private:
             g_inKeyGenMode = false;
             NS_LOG_UNCOND("[" << GetRealTimestamp() << "] Key generation mode OFF: buffer reached "
                           << KEY_THRESHOLD_TO_ACCEPT << " keys, accepting requests");
+            NS_LOG_UNCOND("[" << GetRealTimestamp() << "] " << DumpBufferState());
         }
 
         // Reschedule periodic check
@@ -383,10 +511,25 @@ private:
             const std::string bufType = isEncKeys
                 ? std::string("enc") : std::string("dec");
             if (!KeysReady(bufType, targetKms)) {
+                // Nudge the KMS fill engine: direct SBuffer consumption bypasses
+                // the KMS's own fill triggers (new key arrival on the master).
+                {
+                    uint32_t peerId = 0;
+                    Ptr<SBuffer> sb = FindSBufferWithId(bufType, targetKms, peerId);
+                    std::string kmsName = (targetKms == g_kmsA) ? "KMS-A" : "KMS-B";
+                    if (sb) {
+                        NS_LOG_UNCOND("[" << GetRealTimestamp() << "] " << bufType << " buffer empty on "
+                                      << kmsName << " (peerId=" << peerId << ", total="
+                                      << sb->GetKeyCount() << ", ready=" << sb->GetDefaultKeyCount()
+                                      << ", state=" << sb->GetState() << ") - triggering refill");
+                        targetKms->TriggerSBufferRefill(peerId);
+                    }
+                }
                 // Enter key generation mode if not already
                 if (!g_inKeyGenMode.exchange(true)) {
                     NS_LOG_UNCOND("[" << GetRealTimestamp() << "] Key generation mode ON: buffer empty, dropping until "
                                   << KEY_THRESHOLD_TO_ACCEPT << " keys accumulated");
+                    NS_LOG_UNCOND("[" << GetRealTimestamp() << "] " << DumpBufferState());
                 }
                 // In key gen mode, drop request immediately without parking
                 // This allows buffer to fill without retry loop interference
@@ -506,7 +649,10 @@ private:
 
         std::vector<Ptr<QKDKey>> keys;
         for (const auto& kid : keyIds) {
-            Ptr<QKDKey> k = sBuffer->GetKey(kid, false);
+            // fireTraces must be true: it is what decrements the SBuffer's bit
+            // counter. With false the counter leaks until the buffer looks full
+            // (bits == Mmax) while empty, and the peer rejects every fill.
+            Ptr<QKDKey> k = sBuffer->GetKey(kid, true);
             if (!k) {
                 nlohmann::json e;
                 e["error"]  = "key_ID not found";
@@ -613,7 +759,7 @@ static bool ReadHttpRequest(int fd, SSL* ssl, std::string& raw)
         size_t headerEnd = raw.find("\r\n\r\n");
         if (headerEnd != std::string::npos) {
             int bodyReceived = static_cast<int>(raw.size() - (headerEnd + 4));
-            `(bodyReceived < contentLen) {
+            while (bodyReceived < contentLen) {
                 if (ssl) {
                     nr = SSL_read(ssl, buf, sizeof(buf) - 1);
                 } else {
@@ -660,7 +806,7 @@ void TcpAcceptThread(uint16_t port)
     NS_LOG_UNCOND("[" << GetRealTimestamp() << "] Endpoints:");
     NS_LOG_UNCOND("[" << GetRealTimestamp() << "]   GET  http(s)://<HOST>:" << port << "/api/v1/keys/any/status");
     NS_LOG_UNCOND("[" << GetRealTimestamp() << "]   GET  http(s)://<HOST>:" << port << "/api/v1/keys/any/enc_keys");
-    NS_LOG_UNCOND("[" << GetRealTimestamp() << "]   GET  http(s)://<HOST>:" << port << "/api/v1/keys/any/enc_keys/number/3");
+    NS_LOG_UNCOND("[" << GetRealTimestamp() << "]   GET  http(s)://<HOST>:" << port << "/api/v1/keys/any/enc_keys/number/1");
     NS_LOG_UNCOND("[" << GetRealTimestamp() << "]   POST http(s)://<HOST>:" << port << "/api/v1/keys/any/dec_keys");
     NS_LOG_UNCOND("");
 
@@ -821,6 +967,10 @@ int main(int argc, char* argv[])
     cmd.AddValue("key", "Server TLS private key (PEM)", g_keyFile);
     cmd.AddValue("cacert", "CA cert to verify client certs (PEM)", g_caFile);
     cmd.Parse(argc, argv);
+
+    // A client that times out and closes its socket must not kill the server
+    // when the bridge later writes the response (SSL_write -> SIGPIPE).
+    std::signal(SIGPIPE, SIG_IGN);
 
     GlobalValue::Bind("SimulatorImplementationType",
                       StringValue("ns3::RealtimeSimulatorImpl"));
