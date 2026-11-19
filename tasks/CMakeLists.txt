@@ -1,10 +1,18 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# BLIB_LIBNAME must be set explicitly here.
-# build_lib() is a CMake *function* — BLIB_LIBNAME it parses is scoped to
-# that function and is NOT visible here. build_lib_example reads it from the
-# *caller's* scope, so we inject it manually.
-# ─────────────────────────────────────────────────────────────────────────────
-set(BLIB_LIBNAME echoserverlinuxns3)
+find_package(OpenSSL REQUIRED)
+find_package(Threads REQUIRED)
+
+# Build example executable from Ns3Code.cpp
+if(TARGET fmt::fmt)
+    build_lib_example(
+        NAME ns3_echo_server_example
+        SOURCE_FILES Ns3Code.cpp
+        LIBRARIES_TO_LINK
+            ${libechoserverlinuxns3}
+            ${libcore}
+            ${libpoint-to-point}
+            ${libinternet}
+            ${libapplications}
+    )
 
 set(COMMON_LIBS_TO_LINK
     ns3::core
@@ -21,7 +29,37 @@ macro(build_echoserver_code name source)
         SOURCE_FILES ${source}
         LIBRARIES_TO_LINK ${COMMON_LIBS_TO_LINK}
     )
-endmacro()
+    target_link_libraries(curl_qkd_bridge
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        Threads::Threads
+    )
 
-build_echoserver_code(ns3_echo_server_example Ns3Code.cpp)
-build_echoserver_code(curlrealsocket         curlrealsocket.cpp)
+    # cpp-httplib standalone HTTP server example (header-only)
+    build_lib_example(
+        NAME cpp_httplib_server
+        SOURCE_FILES ../app/server.cpp
+        LIBRARIES_TO_LINK
+            ${libcore}
+    )
+
+    build_lib_example(
+        NAME tlsserver
+        SOURCE_FILES ../app/tlsserver.cpp
+        LIBRARIES_TO_LINK
+            ${libcore}
+    )
+
+    target_link_libraries(ns3_echo_server_example fmt::fmt)
+    # target_link_libraries(curl_simulation fmt::fmt)
+    target_link_libraries(curl_bridged_socket fmt::fmt)
+    target_link_libraries(curl_real_socket fmt::fmt)
+    target_link_libraries(cpp_httplib_server Threads::Threads)
+    target_link_libraries(tlsserver 
+                    OpenSSL::SSL
+                    OpenSSL::Crypto
+                    Threads::Threads
+    )
+else()
+    message(STATUS "Skipping ns3_echo_server_example: fmt not found")
+endif()
