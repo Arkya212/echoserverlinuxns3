@@ -1,5 +1,6 @@
+#pragma once
 
 namespace ns3
 {
-    static int TEMP =0;
+    [[maybe_unused]] static int TEMP =0;
 }
