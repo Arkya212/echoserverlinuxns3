@@ -146,7 +146,7 @@ Reference material used while designing the socket/server architecture:
 
 ## License
 
-No license has been declared yet — this repository is currently a personal research/portfolio project and should not be assumed to be reusable without contacting the author.
+This project is licensed under the **GNU General Public License v2.0 (GPL-2.0)** — see the [LICENSE](LICENSE) file for details. Third-party components (such as QKDNetSim) remain under their respective GPL-2.0 copyrights.
 
 ## Author
 
