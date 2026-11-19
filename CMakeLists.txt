@@ -12,6 +12,16 @@ set(NS3_FMT "OFF" CACHE INTERNAL "ON if FMT is successfully found or built")
 
 include(CPM)
 cpmaddpackage("gh:fmtlib/fmt#11.2.0")
+CPMAddPackage(
+  NAME benchmark
+  GITHUB_REPOSITORY google/benchmark
+  GIT_TAG v1.9.0
+  GIT_SHALLOW TRUE
+  OPTIONS
+    "BENCHMARK_ENABLE_TESTING OFF"
+    "BENCHMARK_ENABLE_GTEST_TESTS OFF" #Avoiding gTest builds for benchmark library.
+)
+
 
 if(TARGET fmt::fmt)
     set(NS3_FMT "ON" CACHE INTERNAL "ON if FMT is successfully found or built")
