@@ -46,9 +46,9 @@ REQ_TIMEOUT_SECS="10"
 CONN_TIMEOUT_SECS="3"
 
 # Request-rate sweep (requests per second) for enc/dec key endpoints.
-RATES=("1" "2" "4")
+RATES=("1" "2" "4" "50" "100")
 # Concurrency levels for the status/burst tests.
-BURSTS=("1")
+BURSTS=("1" "5" "50")
 # Final connection-limit stress burst size.
 STRESS_BURST="0"
 ENC_SAE="alice"
